@@ -1,36 +1,204 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Money Manager
 
-## Getting Started
+A local-first desktop dashboard for personal spending. Import a CSV exported
+from the [Money Manager](https://help.realbyteapps.com/) app and immediately see
+where your money is going.
 
-First, run the development server:
+Everything runs on your machine. There is no account, no cloud, no telemetry,
+and no network access at runtime.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Features
+
+- **Import** — drag-and-drop a Money Manager **CSV or Excel** export, see a
+  preview (total / valid / duplicate / invalid), and confirm. Re-importing the
+  same export is idempotent, so you never get duplicate transactions.
+- **Dashboard** — income, expenses, net savings, savings rate, current vs
+  previous month spending, and charts for income vs expenses, spending trend,
+  spending by category, and top expenses.
+- **Monthly analysis** — pick any month and see category breakdowns with the
+  change from the previous month.
+- **Transactions** — search, filter (category, account, type, date range) and
+  sort across thousands of rows, with pagination.
+
+## Tech stack
+
+Next.js (App Router, static export) · TypeScript · Tailwind CSS · shadcn/ui ·
+SQLite · Drizzle ORM · Recharts · Tauri 2.
+
+## Project structure
+
+```
+money-manager/
+├── app/                     # routes: /dashboard, /transactions, /import
+├── components/
+│   ├── ui/                  # shadcn/ui primitives
+│   ├── dashboard/           # summary cards + charts
+│   ├── transactions/        # filters + table
+│   ├── import/              # dropzone
+│   └── layout/              # app shell, page header, month picker
+├── lib/
+│   ├── db/                  # schema, repository, transport layer
+│   ├── importer/            # Money Manager CSV parsing + dedupe
+│   ├── analytics/           # formatting, month math, summary maths
+│   └── hooks/               # useAsync
+├── drizzle/                 # generated SQL migrations
+├── scripts/                 # dev database server + utilities
+└── src-tauri/               # Tauri desktop shell
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Prerequisites
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+- [Bun](https://bun.sh) 1.2+
+- Rust (for the desktop build) — install with
+  [rustup](https://rustup.rs)
+- Linux only: WebView and build libraries
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+```bash
+sudo apt update
+sudo apt install libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+```
 
-## Learn More
+Windows and macOS need no extra packages beyond Rust's toolchain.
 
-To learn more about Next.js, take a look at the following resources:
+## Getting started
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+bun install
+bun run db:generate   # regenerate migrations after schema changes
+bun run dev           # starts Next.js + the local SQLite server
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Open <http://localhost:3000>. The import page has a **Load sample data** button
+if you want to try it without a real export.
 
-## Deploy on Vercel
+### Scripts
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| Command | Description |
+| --- | --- |
+| `bun run dev` | Next.js dev server + local SQLite server together |
+| `bun run dev:next` | Next.js only |
+| `bun run dev:db` | Local SQLite server only |
+| `bun run build` | Static export into `out/` |
+| `bun run test` | Unit tests (importer, analytics) |
+| `bun run lint` | ESLint |
+| `bun run db:generate` | Generate a Drizzle migration |
+| `bun run db:studio` | Browse the database with Drizzle Studio |
+| `bun run fixtures` | Regenerate the sample CSV/Excel fixtures |
+| `bun run migrate:icons` | Decode icon glyphs in already-imported rows |
+| `bun run tauri dev` | Run the desktop app (requires Rust + Linux libs) |
+| `bun run tauri build` | Package installers for the current platform |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+`bun scripts/smoke.ts` imports the sample fixture and exercises the repository;
+run it while `bun run dev:db` is active.
+
+## How the database is accessed
+
+The UI never talks to SQLite directly. It always uses Drizzle's `sqlite-proxy`
+driver through a small transport interface (`lib/db/transport.ts`):
+
+- **Local development** the transport posts SQL to the local server started by
+  `bun scripts/db-server.ts`, which owns the database file with `bun:sqlite`.
+- **Static web builds** (GitHub Pages) use SQLite compiled to WebAssembly
+  (sql.js) with the database persisted in **IndexedDB** — no server at all.
+  Selected automatically in production, or with `NEXT_PUBLIC_DB_DRIVER=browser`.
+- **In the desktop app** the transport calls the Tauri SQL plugin, which stores
+  the database in the OS app-data directory. Nothing is written inside the
+  project or the installed bundle.
+
+All query code (`lib/db/repository.ts`) is shared across all three. Migrations
+are generated by Drizzle and embedded for the browser via
+`bun scripts/embed-migrations.ts`.
+
+## Import format
+
+The parser lives entirely in `lib/importer/`. It auto-detects columns, so the
+Money Manager export layout can be adjusted in one place
+(`COLUMN_ALIASES` in `lib/importer/money-manager.ts`) without touching the rest
+of the app.
+
+Both **CSV** (`.csv`/`.tsv`/`.txt`) and **Excel** (`.xlsx`/`.xls`) exports are
+supported. Excel parsing uses SheetJS, loaded lazily so it only ships when you
+actually import a spreadsheet. Text files are decoded with BOM detection and a
+Windows-1252 fallback, so emoji and accented characters survive exports that
+are not UTF-8. Duplicate header names are de-duplicated so an extra column
+cannot shadow the real one.
+
+The current export is expected to look like this:
+
+| Column | Example |
+| --- | --- |
+| `Date` | `30/09/2026 11:34:13` |
+| `Account` | `HDFC` |
+| `Category` | `Food` |
+| `Subcategory` | `Restaurant` |
+| `Note` | `Dinner` |
+| `Income/Expense` | `Income` / `Expense` / `Transfer-Out` |
+| `Description` | `Big Basket` |
+| `Amount` | `1250.00` |
+| `Currency` | `INR` |
+
+Notes:
+
+- Dates are treated as **day-first** (`dd/MM/yyyy`) unless the day is
+  unambiguously month-first. Override with the `dateOrder` option.
+- Amounts are stored as **integer minor units** (paise) to keep sums exact.
+- `Transfer-Out` rows are imported as transfers and excluded from income /
+  expense totals, since they only move money between your own accounts.
+- With no transaction id in the export, duplicates are detected with a
+  SHA-256 fingerprint over the normalized row, enforced by a unique
+  `(source, dedupe_hash)` index.
+- Money Manager prefixes category/account names with glyphs from its own icon
+  font (private-use codepoints such as `U+F4B0`). These are decoded to real
+  emoji on import (`U+F4B0` → 💰), including variation selectors and skin-tone
+  modifiers.
+
+Sample fixtures for both formats live in `lib/importer/fixtures/`
+(`sample.csv`, `sample.xlsx`), generated by `bun run fixtures`.
+
+## Data location
+
+- **Development**: `data/money-manager.db` (git-ignored).
+- **Desktop**: the OS app-data directory, resolved by Tauri from
+  `sqlite:money-manager.db`.
+
+## Desktop builds
+
+```bash
+bun run tauri dev     # develop inside a native window
+bun run tauri build   # produce installers
+```
+
+Outputs: `.deb` / AppImage (Linux), `.exe` / NSIS installer (Windows), `.dmg`
+(macOS). Build each platform on that platform (or in CI).
+
+The migration embedded in `src-tauri/src/lib.rs` points at the generated file in
+`drizzle/`. If `bun run db:generate` creates a new filename, update that
+`include_str!` path.
+
+## Deploy the web app (GitHub Pages)
+
+The web build is a static site that runs entirely in the browser: SQLite via
+sql.js (WASM) with data stored in **IndexedDB**. No server, no uploads.
+
+1. Push the repo to GitHub.
+2. **Settings → Pages → Build and deployment → Source: GitHub Actions.**
+3. The workflow at `.github/workflows/deploy-pages.yml` builds on every push to
+   `main` and publishes `out/`.
+4. Visit `https://<user>.github.io/<repo>/`.
+
+The workflow sets `NEXT_PUBLIC_BASE_PATH=/${{ github.event.repository.name }}`
+so assets resolve under the project sub-path, and `NEXT_PUBLIC_DB_DRIVER=browser`.
+
+Notes:
+
+- Browser data lives in IndexedDB, per browser/profile. Clearing site data wipes
+  it, and it is **separate** from the local-development and desktop databases.
+- Preview a static build locally: `bun run build:web` then serve `out/`.
+- For a different static host, set `NEXT_PUBLIC_BASE_PATH` to the sub-path (or
+  leave it empty for a root domain).
+
+## Privacy
+
+Personal financial data only. No authentication, cloud storage, analytics,
+third-party financial APIs, or telemetry. All data stays on the device.
